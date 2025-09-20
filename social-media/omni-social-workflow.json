@@ -1,0 +1,808 @@
+{
+  "name": "Omni-Social Auto-Reply + Scheduler (IG/FB/TikTok/YouTube)",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "meta-webhook",
+        "responseMode": "lastNode",
+        "options": {
+          "responseData": "ok",
+          "responseCode": 200
+        }
+      },
+      "id": "Meta Webhook",
+      "name": "Webhook (Meta IG/FB)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        200,
+        -200
+      ]
+    },
+    {
+      "parameters": {
+        "path": "tiktok-webhook",
+        "responseMode": "lastNode",
+        "options": {
+          "responseData": "ok",
+          "responseCode": 200
+        }
+      },
+      "id": "TikTok Webhook",
+      "name": "Webhook (TikTok)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        200,
+        40
+      ]
+    },
+    {
+      "parameters": {
+        "path": "youtube-webhook",
+        "responseMode": "lastNode",
+        "options": {
+          "responseData": "ok",
+          "responseCode": 200
+        }
+      },
+      "id": "YouTube Webhook",
+      "name": "Webhook (YouTube)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        200,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Normalize inbound payloads to a unified schema\n// Output items of shape:\n// { platform, type: 'comment'|'message', text, author_id, thread_id, target_id, account_key }\nconst out = [];\nfor (const item of items) {\n  const body = item.json;\n  const headers = item.headers || {};\n\n  // Route by webhook path hint\n  const path = (item.binary && item.binary.request) ? item.binary.request.path : (body._path || '');\n\n  // Meta (IG/FB) webhook payload\n  if (body.object && (body.object === 'page' || body.object === 'instagram')) {\n    for (const entry of body.entry || []) {\n      const account = entry.id;\n      // comments\n      if (entry.changes) {\n        for (const ch of entry.changes) {\n          const val = ch.value || {};\n          const isComment = val.item === 'comment' || val.field === 'comments';\n          const isMessage = val.item === 'message' || val.field === 'messages';\n          if (isComment) {\n            out.push({\n              json: {\n                platform: (body.object === 'instagram') ? 'instagram' : 'facebook',\n                type: 'comment',\n                text: val.message || '',\n                author_id: val.from?.id,\n                thread_id: val.comment_id || val.post_id,\n                target_id: val.post_id,\n                account_key: account\n              }\n            });\n          }\n          if (isMessage) {\n            out.push({\n              json: {\n                platform: (body.object === 'instagram') ? 'instagram' : 'facebook',\n                type: 'message',\n                text: val.message || '',\n                author_id: val.from?.id,\n                thread_id: val.thread_id || val.sender_id,\n                target_id: account,\n                account_key: account\n              }\n            });\n          }\n        }\n      }\n    }\n  }\n\n  // TikTok Business webhook (simplified)\n  if (body.platform === 'tiktok' || headers['x-tiktok-signature']) {\n    const events = body.events || [body];\n    for (const ev of events) {\n      if (ev.event_type === 'comment.added') {\n        out.push({\n          json: {\n            platform: 'tiktok',\n            type: 'comment',\n            text: ev.comment_text || '',\n            author_id: ev.user_id || ev.commenter_id,\n            thread_id: ev.comment_id,\n            target_id: ev.video_id || ev.post_id,\n            account_key: ev.account_id || ev.business_id\n          }\n        });\n      } else if (ev.event_type === 'message.received') {\n        out.push({\n          json: {\n            platform: 'tiktok',\n            type: 'message',\n            text: ev.message_text || '',\n            author_id: ev.from_user_id,\n            thread_id: ev.conversation_id,\n            target_id: ev.to_user_id,\n            account_key: ev.account_id || ev.business_id\n          }\n        });\n      }\n    }\n  }\n\n  // YouTube webhook (custom gateway or Pub/Sub push via proxy)\n  if (body.platform === 'youtube' || headers['x-youtube-notification']) {\n    const evs = body.events || [body];\n    for (const ev of evs) {\n      if (ev.kind === 'youtube#comment') {\n        out.push({\n          json: {\n            platform: 'youtube',\n            type: 'comment',\n            text: ev.snippet?.textOriginal || '',\n            author_id: ev.snippet?.authorChannelId,\n            thread_id: ev.id || ev.snippet?.videoId,\n            target_id: ev.snippet?.videoId,\n            account_key: ev.account_key || ev.channel_id\n          }\n        });\n      } else if (ev.kind === 'youtube#livemessage') {\n        out.push({\n          json: {\n            platform: 'youtube',\n            type: 'message',\n            text: ev.snippet?.displayMessage || '',\n            author_id: ev.snippet?.authorChannelId,\n            thread_id: ev.snippet?.liveChatId,\n            target_id: ev.snippet?.liveChatId,\n            account_key: ev.account_key || ev.channel_id\n          }\n        });\n      }\n    }\n  }\n}\nreturn out;\n"
+      },
+      "id": "Normalize Events",
+      "name": "Function: Normalize Events",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [
+        520,
+        20
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "lookup",
+        "sheetId": "={{$env.GSHEET_CONFIG_ID}}",
+        "range": "Accounts!A1:G999",
+        "keyColumn": "A",
+        "keyValue": "={{$json.platform + ':' + $json.account_key}}"
+      },
+      "id": "Lookup Account",
+      "name": "Google Sheets: Lookup Account",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 6,
+      "position": [
+        760,
+        20
+      ],
+      "credentials": {
+        "googleApi": {
+          "id": "={{$env.GOOGLE_CREDENTIAL_ID}}",
+          "name": "Google API (Service Account)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Build reply prompt using per-account config from Google Sheet\n// Expected columns:\n// A key (platform:account_key)\n// B access_token\n// C reply_style (short|friendly|sales|support)\n// D persona_prompt (instructions)\n// E keywords_csv (optional)\n// F llm_endpoint (optional)\n// G llm_api_key (optional)\nconst cfg = $json;\nconst text = $items(0, 0).json.text;\nconst platform = $items(0, 0).json.platform;\nconst type = $items(0, 0).json.type;\n\nconst persona = cfg['D'] || 'رد بشكل مهذب ومختصر ووضح أي روابط أو خطوات عند الحاجة.';\nconst style = (cfg['C'] || 'friendly').toLowerCase();\nconst styleHint = {\n  friendly: 'خليك ودود وقريب، ورد بسرعة وباختصار مفيد.',\n  sales: 'ركز على تحويل المهتم إلى عميل: اسأل سؤال توجيهي وقدّم CTA واضح.',\n  support: 'اطلب تفاصيل بسيطة لو ناقصة، واذكر خطوات عملية مختصرة.',\n  short: 'رد قصير جدًا بدون حشو.'\n}[style] || 'خليك واضح ومباشر.';\n\nreturn [{\n  json: {\n    platform,\n    type,\n    text,\n    access_token: cfg['B'],\n    persona_prompt: persona,\n    styleHint,\n    llm_endpoint: cfg['F'] || '',\n    llm_api_key: cfg['G'] || '',\n    account_key: $items(0, 0).json.account_key,\n    author_id: $items(0, 0).json.author_id,\n    thread_id: $items(0, 0).json.thread_id,\n    target_id: $items(0, 0).json.target_id\n  }\n}];\n"
+      },
+      "id": "Compose Prompt",
+      "name": "Function: Compose Prompt",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [
+        1020,
+        20
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// If llm_endpoint provided, use it; otherwise create a template-based reply.\nconst itemsOut = [];\nfor (const item of items) {\n  const j = item.json;\n  let reply = '';\n  if (j.llm_endpoint) {\n    // Pass downstream to HTTP Request node\n    itemsOut.push({json: j});\n  } else {\n    // Simple template fallback\n    const t = j.text || '';\n    if (t.match(/سعر|price|كم|cost/i)) {\n      reply = 'أهلاً! أرسل لنا احتياجاتك ونرجّع لك عرض سعر مناسب خلال وقت قصير.';\n    } else if (t.match(/موعد|حجز|reservation|booking/i)) {\n      reply = 'تشرفنا! للتأكيد اكتب لنا اليوم والوقت المناسب، أو استخدم رابط الحجز في البايو.';\n    } else {\n      reply = 'أهلاً بك! شكرًا على رسالتك. وضّح لنا طلبك بشكل سريع وسنرد عليك بخطوات واضحة.';\n    }\n    itemsOut.push({json: {...j, generated_reply: reply, using_llm: false}});\n  }\n}\nreturn itemsOut;\n"
+      },
+      "id": "Generate Reply (fallback or LLM)",
+      "name": "Function: Generate Reply (fallback or LLM)",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [
+        1240,
+        20
+      ]
+    },
+    {
+      "parameters": {
+        "requestMethod": "POST",
+        "url": "={{$json.llm_endpoint}}",
+        "jsonParameters": true,
+        "options": {
+          "timeout": 8000
+        },
+        "sendHeaders": true,
+        "headerParametersJson": "={{ $json.llm_api_key ? { 'Authorization': 'Bearer ' + $json.llm_api_key } : {} }}",
+        "bodyParametersJson": "={{ { input: $json.text, persona: $json.persona_prompt, style: $json.styleHint, platform: $json.platform } }}"
+      },
+      "id": "HTTP LLM",
+      "name": "HTTP Request: LLM Generator (optional)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        1460,
+        -60
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Consolidate reply text, whether from LLM node or fallback\nlet reply = $json.generated_reply;\nif (!reply && $json.data) {\n  // Assuming LLM returns {data: {reply: \"...\"} } or {reply: \"...\"}\n  reply = $json.data.reply || $json.reply || JSON.stringify($json.data);\n} else if (!reply && $json.reply) {\n  reply = $json.reply;\n}\nreturn [{\n  json: {\n    platform: $items(0,0).json.platform,\n    type: $items(0,0).json.type,\n    reply,\n    access_token: $items(0,0).json.access_token,\n    thread_id: $items(0,0).json.thread_id,\n    target_id: $items(0,0).json.target_id,\n    account_key: $items(0,0).json.account_key\n  }\n}];\n"
+      },
+      "id": "Assemble Reply",
+      "name": "Function: Assemble Reply",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        20
+      ]
+    },
+    {
+      "parameters": {
+        "propertyName": "platform",
+        "rules": {
+          "values": [
+            {
+              "value": "instagram"
+            },
+            {
+              "value": "facebook"
+            },
+            {
+              "value": "tiktok"
+            },
+            {
+              "value": "youtube"
+            }
+          ]
+        }
+      },
+      "id": "Route Platform",
+      "name": "Switch: Platform",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [
+        1880,
+        20
+      ]
+    },
+    {
+      "parameters": {
+        "requestMethod": "POST",
+        "url": "={{ 'https://graph.facebook.com/v19.0/' + $json.thread_id + '/comments' }}",
+        "jsonParameters": true,
+        "options": {},
+        "sendQuery": true,
+        "queryParametersJson": "={{ { access_token: $json.access_token } }}",
+        "sendBody": true,
+        "bodyParametersJson": "={{ { message: $json.reply } }}"
+      },
+      "id": "Reply IG/FB Comment",
+      "name": "HTTP: Meta Comment Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        2100,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "requestMethod": "POST",
+        "url": "={{ 'https://graph.facebook.com/v19.0/me/messages' }}",
+        "jsonParameters": true,
+        "options": {},
+        "sendBody": true,
+        "headerParametersJson": "={{ { 'Authorization': 'Bearer ' + $json.access_token, 'Content-Type': 'application/json' } }}",
+        "bodyParametersJson": "={{ { recipient: { id: $json.thread_id }, message: { text: $json.reply } } }}"
+      },
+      "id": "Reply IG/FB DM",
+      "name": "HTTP: Meta DM Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        2100,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "requestMethod": "POST",
+        "url": "={{ $env.TIKTOK_REPLY_ENDPOINT || 'https://open.tiktokapis.com/v2/business/comment/reply/' }}",
+        "jsonParameters": true,
+        "options": {},
+        "sendHeaders": true,
+        "headerParametersJson": "={{ { 'Authorization': 'Bearer ' + $json.access_token } }}",
+        "bodyParametersJson": "={{ { comment_id: $json.thread_id, text: $json.reply } }}"
+      },
+      "id": "Reply TikTok",
+      "name": "HTTP: TikTok Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        2100,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "requestMethod": "POST",
+        "url": "={{ 'https://www.googleapis.com/youtube/v3/comments?part=snippet' }}",
+        "jsonParameters": true,
+        "options": {},
+        "sendHeaders": true,
+        "headerParametersJson": "={{ { 'Authorization': 'Bearer ' + $json.access_token } }}",
+        "bodyParametersJson": "={{ { snippet: { parentId: $json.thread_id, textOriginal: $json.reply } } }}"
+      },
+      "id": "Reply YouTube",
+      "name": "HTTP: YouTube Comment Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        2100,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "cronExpressions": {
+          "items": [
+            {
+              "mode": "everyX",
+              "hoursInterval": 0,
+              "minutesInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "Cron",
+      "name": "Cron: every 1 min",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [
+        200,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "lookup",
+        "sheetId": "={{$env.GSHEET_CONFIG_ID}}",
+        "range": "Schedule!A1:H999",
+        "keyColumn": "E",
+        "keyValue": "PENDING"
+      },
+      "id": "Fetch Schedule",
+      "name": "Google Sheets: Fetch Schedule (status=PENDING)",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 6,
+      "position": [
+        420,
+        520
+      ],
+      "credentials": {
+        "googleApi": {
+          "id": "={{$env.GOOGLE_CREDENTIAL_ID}}",
+          "name": "Google API (Service Account)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Expect Schedule columns:\n// A datetime_iso, B platform, C account_key, D drive_file_id, E status, F caption, G extra_json, H target_id(optional)\nconst now = new Date();\nreturn items\n  .filter(it => {\n    const dt = new Date(it.json['A']);\n    return !isNaN(dt.getTime()) && dt <= now && (it.json['E']||'').toUpperCase() === 'PENDING';\n  })\n  .map(it => ({ json: { \n    datetime: it.json['A'],\n    platform: it.json['B'],\n    account_key: it.json['C'],\n    drive_file_id: it.json['D'],\n    status: it.json['E'],\n    caption: it.json['F'] || '',\n    extra_json: it.json['G'] || '{}',\n    target_id: it.json['H'] || ''\n  }}));\n"
+      },
+      "id": "Due Now Filter",
+      "name": "Function: Filter due now",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [
+        640,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "lookup",
+        "sheetId": "={{$env.GSHEET_CONFIG_ID}}",
+        "range": "Accounts!A1:G999",
+        "keyColumn": "A",
+        "keyValue": "={{$json.platform + ':' + $json.account_key}}"
+      },
+      "id": "Lookup Account (Scheduler)",
+      "name": "Google Sheets: Lookup Account (Scheduler)",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 6,
+      "position": [
+        860,
+        520
+      ],
+      "credentials": {
+        "googleApi": {
+          "id": "={{$env.GOOGLE_CREDENTIAL_ID}}",
+          "name": "Google API (Service Account)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "download",
+        "fileId": "={{$json['D'] || $json.drive_file_id}}",
+        "options": {}
+      },
+      "id": "Download Asset",
+      "name": "Google Drive: Download Asset",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 4,
+      "position": [
+        1080,
+        520
+      ],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "={{$env.GOOGLE_DRIVE_CRED_ID}}",
+          "name": "Google Drive OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "propertyName": "B",
+        "rules": {
+          "values": [
+            {
+              "value": "instagram"
+            },
+            {
+              "value": "facebook"
+            },
+            {
+              "value": "tiktok"
+            },
+            {
+              "value": "youtube"
+            }
+          ]
+        }
+      },
+      "id": "Route Scheduler Platform",
+      "name": "Switch: Platform (Scheduler)",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [
+        1300,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "requestMethod": "POST",
+        "url": "={{ 'https://graph.facebook.com/v19.0/' + ($json['H'] || $json.target_id) + '/media' }}",
+        "jsonParameters": true,
+        "sendQuery": true,
+        "queryParametersJson": "={{ { image_url: $binary.data?.data ? undefined : $json.fileUrl, caption: $json['F'] || $json.caption, access_token: $json['B'] } }}",
+        "options": {},
+        "sendBody": false
+      },
+      "id": "IG Create Media",
+      "name": "HTTP: Instagram Create Media",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        1520,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "requestMethod": "POST",
+        "url": "={{ 'https://graph.facebook.com/v19.0/' + ($json['H'] || $json.target_id) + '/media_publish' }}",
+        "jsonParameters": true,
+        "sendQuery": true,
+        "queryParametersJson": "={{ { creation_id: $json.id, access_token: $json['B'] } }}",
+        "options": {}
+      },
+      "id": "IG Publish Media",
+      "name": "HTTP: Instagram Publish Media",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        1740,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "requestMethod": "POST",
+        "url": "={{ 'https://graph.facebook.com/v19.0/' + ($json['H'] || $json.target_id) + '/photos' }}",
+        "jsonParameters": true,
+        "sendQuery": true,
+        "queryParametersJson": "={{ { caption: $json['F'] || $json.caption, access_token: $json['B'], url: $json.fileUrl } }}",
+        "options": {}
+      },
+      "id": "FB Publish Photo",
+      "name": "HTTP: Facebook Publish Photo",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        1520,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "requestMethod": "POST",
+        "url": "={{ $env.TIKTOK_UPLOAD_ENDPOINT || 'https://open.tiktokapis.com/v2/post/publish/' }}",
+        "jsonParameters": true,
+        "sendHeaders": true,
+        "headerParametersJson": "={{ { 'Authorization': 'Bearer ' + $json['B'] } }}",
+        "bodyParametersJson": "={{ { caption: $json['F'] || $json.caption, video_url: $json.fileUrl } }}",
+        "options": {}
+      },
+      "id": "TikTok Publish",
+      "name": "HTTP: TikTok Publish",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        1520,
+        700
+      ]
+    },
+    {
+      "parameters": {
+        "requestMethod": "POST",
+        "url": "={{ $env.YT_UPLOAD_PROXY || 'https://your-proxy.example.com/youtube/upload' }}",
+        "jsonParameters": true,
+        "sendHeaders": true,
+        "headerParametersJson": "={{ { 'Authorization': 'Bearer ' + $json['B'] } }}",
+        "bodyParametersJson": "={{ { title: ($json['F']||$json.caption).slice(0,95), description: $json['F']||$json.caption, fileUrl: $json.fileUrl, channelId: $json['H'] || $json.target_id } }}",
+        "options": {}
+      },
+      "id": "YouTube Publish (via proxy)",
+      "name": "HTTP: YouTube Publish (via proxy)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        1520,
+        840
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "sheetId": "={{$env.GSHEET_CONFIG_ID}}",
+        "range": "Schedule!A1:H999",
+        "keyColumn": "A",
+        "keyValue": "={{$json.datetime}}",
+        "dataMode": "keySpecified",
+        "options": {},
+        "updateAllMatches": false,
+        "updateKey": "E",
+        "valueInputMode": "RAW",
+        "fieldsUi": {
+          "field": [
+            {
+              "fieldId": "E",
+              "fieldValue": "DONE"
+            }
+          ]
+        }
+      },
+      "id": "Mark Done",
+      "name": "Google Sheets: Mark DONE",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 6,
+      "position": [
+        1980,
+        520
+      ],
+      "credentials": {
+        "googleApi": {
+          "id": "={{$env.GOOGLE_CREDENTIAL_ID}}",
+          "name": "Google API (Service Account)"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Webhook (Meta IG/FB)": {
+      "main": [
+        [
+          {
+            "node": "Function: Normalize Events",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook (TikTok)": {
+      "main": [
+        [
+          {
+            "node": "Function: Normalize Events",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook (YouTube)": {
+      "main": [
+        [
+          {
+            "node": "Function: Normalize Events",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Function: Normalize Events": {
+      "main": [
+        [
+          {
+            "node": "Google Sheets: Lookup Account",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Sheets: Lookup Account": {
+      "main": [
+        [
+          {
+            "node": "Function: Compose Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Function: Compose Prompt": {
+      "main": [
+        [
+          {
+            "node": "Function: Generate Reply (fallback or LLM)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request: LLM Generator (optional)": {
+      "main": [
+        [
+          {
+            "node": "Function: Assemble Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Function: Generate Reply (fallback or LLM)": {
+      "main": [
+        [
+          {
+            "node": "Function: Assemble Reply",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP Request: LLM Generator (optional)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Function: Assemble Reply": {
+      "main": [
+        [
+          {
+            "node": "Switch: Platform",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch: Platform": {
+      "main": [
+        [
+          {
+            "node": "HTTP: Meta Comment Reply",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP: Meta DM Reply",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP: TikTok Reply",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP: YouTube Comment Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cron: every 1 min": {
+      "main": [
+        [
+          {
+            "node": "Google Sheets: Fetch Schedule (status=PENDING)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Sheets: Fetch Schedule (status=PENDING)": {
+      "main": [
+        [
+          {
+            "node": "Function: Filter due now",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Function: Filter due now": {
+      "main": [
+        [
+          {
+            "node": "Google Sheets: Lookup Account (Scheduler)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Sheets: Lookup Account (Scheduler)": {
+      "main": [
+        [
+          {
+            "node": "Google Drive: Download Asset",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Drive: Download Asset": {
+      "main": [
+        [
+          {
+            "node": "Switch: Platform (Scheduler)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch: Platform (Scheduler)": {
+      "main": [
+        [
+          {
+            "node": "HTTP: Instagram Create Media",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP: Facebook Publish Photo",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP: TikTok Publish",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP: YouTube Publish (via proxy)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP: Instagram Create Media": {
+      "main": [
+        [
+          {
+            "node": "HTTP: Instagram Publish Media",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP: Instagram Publish Media": {
+      "main": [
+        [
+          {
+            "node": "Google Sheets: Mark DONE",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP: Facebook Publish Photo": {
+      "main": [
+        [
+          {
+            "node": "Google Sheets: Mark DONE",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP: TikTok Publish": {
+      "main": [
+        [
+          {
+            "node": "Google Sheets: Mark DONE",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP: YouTube Publish (via proxy)": {
+      "main": [
+        [
+          {
+            "node": "Google Sheets: Mark DONE",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "versionId": "1"
+}
